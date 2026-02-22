@@ -1,0 +1,7 @@
+.tmp-discord-examples/
+backend/node_modules/
+frontend/node_modules/
+frontend/.next/
+backend/.env
+frontend/.env.local
+npm-debug.log*
