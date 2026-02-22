@@ -39,14 +39,85 @@ const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '')
   .map((origin) => origin.trim())
   .filter(Boolean);
 
-const corsOptions = {
-  origin(origin, callback) {
-    if (!origin || ALLOWED_ORIGINS.length === 0 || ALLOWED_ORIGINS.includes(origin)) {
-      callback(null, true);
-      return;
+const ALLOW_DISCORD_EMBEDDED_ORIGINS = process.env.ALLOW_DISCORD_EMBEDDED_ORIGINS !== 'false';
+
+function normalizeOrigin(origin) {
+  return String(origin || '').trim().replace(/\/$/, '');
+}
+
+function hostnameFromOrigin(origin) {
+  try {
+    return new URL(origin).hostname.toLowerCase();
+  } catch {
+    return '';
+  }
+}
+
+function matchesConfiguredOrigin(origin, hostname) {
+  for (const allowed of ALLOWED_ORIGINS) {
+    const normalizedAllowed = normalizeOrigin(allowed);
+
+    if (!normalizedAllowed) {
+      continue;
     }
 
-    callback(new Error(`Origin not allowed by CORS: ${origin}`));
+    if (normalizedAllowed === '*') {
+      return true;
+    }
+
+    if (origin === normalizedAllowed) {
+      return true;
+    }
+
+    if (normalizedAllowed.startsWith('*.')) {
+      const suffix = normalizedAllowed.slice(2).toLowerCase();
+      if (hostname && (hostname === suffix || hostname.endsWith(`.${suffix}`))) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
+function isDiscordEmbeddedOrigin(hostname) {
+  if (!hostname) {
+    return false;
+  }
+
+  if (hostname === 'discord.com' || hostname === 'ptb.discord.com' || hostname === 'canary.discord.com') {
+    return true;
+  }
+
+  return hostname.endsWith('.discordsays.com');
+}
+
+function isAllowedCorsOrigin(origin) {
+  if (!origin) {
+    return true;
+  }
+
+  const normalizedOrigin = normalizeOrigin(origin);
+  const hostname = hostnameFromOrigin(normalizedOrigin);
+
+  if (ALLOWED_ORIGINS.length === 0) {
+    return true;
+  }
+
+  if (matchesConfiguredOrigin(normalizedOrigin, hostname)) {
+    return true;
+  }
+
+  if (ALLOW_DISCORD_EMBEDDED_ORIGINS && isDiscordEmbeddedOrigin(hostname)) {
+    return true;
+  }
+
+  return false;
+}
+
+const corsOptions = {
+  origin(origin, callback) {
+    callback(null, isAllowedCorsOrigin(origin));
   },
   credentials: true,
 };
@@ -688,6 +759,13 @@ app.get('/api/discord/me', async (req, res) => {
       details: error instanceof Error ? error.message : String(error),
     });
   }
+});
+
+app.use((error, _req, res, _next) => {
+  res.status(500).json({
+    error: 'Unhandled backend error.',
+    details: error instanceof Error ? error.message : String(error),
+  });
 });
 
 io.on('connection', (socket) => {
