@@ -127,6 +127,10 @@ function normalizePrefix(prefix: string) {
 function buildApiUrl(base: string, path: string) {
   const normalizedPath = path.startsWith('/') ? path : `/${path}`;
 
+  if (!base || base === '/') {
+    return normalizedPath;
+  }
+
   if (isAbsoluteHttpUrl(base)) {
     return `${base.replace(/\/$/, '')}${normalizedPath}`;
   }
@@ -257,9 +261,7 @@ export default function Page() {
           scope: ['identify', 'applications.commands', 'rpc.voice.read'],
         });
 
-        const base = backendBaseFor(true);
-
-        const tokenResponse = await fetch(buildApiUrl(base, '/api/discord/token'), {
+        const tokenResponse = await fetch('/api/discord/token', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -293,7 +295,7 @@ export default function Page() {
         };
 
         try {
-          const meResponse = await fetch(buildApiUrl(base, '/api/discord/me'), {
+          const meResponse = await fetch('/api/discord/me', {
             headers: {
               Authorization: `Bearer ${tokenPayload.access_token}`,
             },
@@ -504,7 +506,7 @@ export default function Page() {
           <h1 className="font-display text-3xl text-[#8B0000]">فشل التهيئة</h1>
           <p className="mt-3 text-sm leading-relaxed text-[#E6E1D5]">{authError || 'تعذر مصادقة Discord.'}</p>
           <p className="mt-2 text-xs text-[#B9B3A7]">
-            تأكد من إعداد `NEXT_PUBLIC_DISCORD_CLIENT_ID` و `NEXT_PUBLIC_BACKEND_MAPPING_PREFIX` و `NEXT_PUBLIC_URL_MAPPINGS`.
+            تأكد من إعداد `NEXT_PUBLIC_DISCORD_CLIENT_ID` و `NEXT_PUBLIC_BACKEND_MAPPING_PREFIX` و `NEXT_PUBLIC_URL_MAPPINGS` بالإضافة إلى `DISCORD_CLIENT_ID` و `DISCORD_CLIENT_SECRET` في Vercel.
           </p>
         </section>
       </main>

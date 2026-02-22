@@ -11,10 +11,8 @@
 - Start Command: `npm start`
 6. Add environment variables:
 - `PORT=10000`
-- `DISCORD_CLIENT_ID=<your_discord_app_id>`
-- `DISCORD_CLIENT_SECRET=<your_discord_client_secret>`
-- `ALLOWED_ORIGINS=https://<your-vercel-domain>.vercel.app,http://localhost:3000`
-- Optional: `DISCORD_REDIRECT_URI=https://<your-vercel-domain>.vercel.app/`
+- `ALLOWED_ORIGINS=https://<your-vercel-domain>.vercel.app,*.discordsays.com,http://localhost:3000`
+- `ALLOW_DISCORD_EMBEDDED_ORIGINS=true`
 7. Deploy and keep your final Render URL, for example:
 - `https://mafia-backend.onrender.com`
 
@@ -28,6 +26,9 @@
 - `NEXT_PUBLIC_BACKEND_URL=https://mafia-backend.onrender.com`
 - `NEXT_PUBLIC_BACKEND_MAPPING_PREFIX=/backend`
 - `NEXT_PUBLIC_URL_MAPPINGS=/backend|mafia-backend.onrender.com`
+- `DISCORD_CLIENT_ID=<your_discord_app_id>`
+- `DISCORD_CLIENT_SECRET=<your_discord_client_secret>`
+- Optional: `DISCORD_REDIRECT_URI=https://<your-vercel-domain>.vercel.app/` (or leave empty)
 5. Deploy and note your Vercel URL:
 - `https://mafia-activity.vercel.app`
 
@@ -44,18 +45,18 @@ Open **Discord Developer Portal -> Applications -> Your App**.
 - Target: `mafia-backend.onrender.com`
 3. Save changes.
 
-This mapping allows frontend requests like `/backend/api/discord/token` and `/backend/socket.io` to proxy securely to Render inside Discord.
+This mapping allows frontend requests like `/backend/socket.io` to proxy securely to Render inside Discord.
 
 ### OAuth2 Redirect URIs
 
 1. Go to **OAuth2 -> General**.
 2. Add your frontend URL as Redirect URI:
 - `https://mafia-activity.vercel.app/`
-3. If you set `DISCORD_REDIRECT_URI` on Render, it must match exactly one Redirect URI here.
+3. If you set `DISCORD_REDIRECT_URI` on Vercel, it must match exactly one Redirect URI here.
 
 ## 4. CORS and WebSocket Validation
 
-1. Ensure Render `ALLOWED_ORIGINS` includes your Vercel URL.
+1. Ensure Render `ALLOWED_ORIGINS` includes your Vercel URL and `*.discordsays.com`.
 2. Confirm backend health endpoint:
 - `https://mafia-backend.onrender.com/health`
 3. Launch the Activity in your private Discord server voice channel.
