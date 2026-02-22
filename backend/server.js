@@ -8,9 +8,9 @@ const { Server } = require('socket.io');
 const app = express();
 
 const PORT = Number(process.env.PORT || 3001);
-const DISCORD_CLIENT_ID = process.env.DISCORD_CLIENT_ID;
-const DISCORD_CLIENT_SECRET = process.env.DISCORD_CLIENT_SECRET;
-const DISCORD_REDIRECT_URI = process.env.DISCORD_REDIRECT_URI;
+const DISCORD_CLIENT_ID = process.env.DISCORD_CLIENT_ID?.trim();
+const DISCORD_CLIENT_SECRET = process.env.DISCORD_CLIENT_SECRET?.trim();
+const DISCORD_REDIRECT_URI = process.env.DISCORD_REDIRECT_URI?.trim();
 
 const PHASES = Object.freeze({
   LOBBY: 'LOBBY',
@@ -691,15 +691,31 @@ app.post('/api/discord/token', async (req, res) => {
       payload.set('redirect_uri', DISCORD_REDIRECT_URI);
     }
 
-    const tokenResponse = await fetch('https://discord.com/api/oauth2/token', {
+    const tokenResponse = await fetch('https://discord.com/api/v10/oauth2/token', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/x-www-form-urlencoded',
+        Accept: 'application/json',
+        'User-Agent': 'DiscordMafiaActivity/1.0',
       },
       body: payload,
     });
 
-    const tokenJson = await tokenResponse.json();
+    const tokenText = await tokenResponse.text();
+    let tokenJson = null;
+
+    try {
+      tokenJson = JSON.parse(tokenText);
+    } catch {
+      res.status(502).json({
+        error: 'Discord token endpoint returned non-JSON response.',
+        status: tokenResponse.status,
+        contentType: tokenResponse.headers.get('content-type'),
+        finalUrl: tokenResponse.url,
+        bodyPreview: tokenText.slice(0, 500),
+      });
+      return;
+    }
 
     if (!tokenResponse.ok) {
       res.status(tokenResponse.status).json({
