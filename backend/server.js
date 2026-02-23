@@ -34,6 +34,18 @@ const ALIGNMENT = Object.freeze({
   CITIZEN: 'CITIZEN',
 });
 
+const DEFAULT_ROOM_SETTINGS = Object.freeze({
+  mafiaCount: 1,
+  doctorCount: 1,
+  detectiveCount: 1,
+});
+
+const SETTINGS_LIMITS = Object.freeze({
+  mafia: { min: 1, max: 6 },
+  doctor: { min: 0, max: 4 },
+  detective: { min: 0, max: 4 },
+});
+
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '')
   .split(',')
   .map((origin) => origin.trim())
@@ -138,6 +150,63 @@ function normalizeRoomId(value) {
     .slice(0, 120);
 }
 
+function clamp(value, min, max) {
+  return Math.min(max, Math.max(min, value));
+}
+
+function parseCount(value, fallback) {
+  if (value == null || value === '') {
+    return fallback;
+  }
+
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) {
+    return fallback;
+  }
+
+  return Math.floor(numeric);
+}
+
+function sanitizeRoomSettings(input = {}, current = DEFAULT_ROOM_SETTINGS) {
+  const mafiaCount = clamp(
+    parseCount(input.mafiaCount, current.mafiaCount),
+    SETTINGS_LIMITS.mafia.min,
+    SETTINGS_LIMITS.mafia.max,
+  );
+
+  const doctorCount = clamp(
+    parseCount(input.doctorCount, current.doctorCount),
+    SETTINGS_LIMITS.doctor.min,
+    SETTINGS_LIMITS.doctor.max,
+  );
+
+  const detectiveCount = clamp(
+    parseCount(input.detectiveCount, current.detectiveCount),
+    SETTINGS_LIMITS.detective.min,
+    SETTINGS_LIMITS.detective.max,
+  );
+
+  return {
+    mafiaCount,
+    doctorCount,
+    detectiveCount,
+  };
+}
+
+function roomRequirementsFromSettings(settings) {
+  const specialRoles = settings.mafiaCount + settings.doctorCount + settings.detectiveCount;
+  const minimumCitizens = 1;
+  const minimumParticipants = specialRoles + minimumCitizens;
+  const minimumPlayers = minimumParticipants + 1; // + الراوي
+
+  return {
+    specialRoles,
+    minimumCitizens,
+    minimumParticipants,
+    minimumPlayers,
+  };
+}
+
 function createNightState() {
   return {
     submittedBy: new Set(),
@@ -148,6 +217,8 @@ function createNightState() {
 }
 
 function createRoom(roomId) {
+  const settings = sanitizeRoomSettings();
+
   return {
     id: roomId,
     phase: PHASES.LOBBY,
@@ -158,6 +229,7 @@ function createRoom(roomId) {
     votes: new Map(),
     night: createNightState(),
     lastResolution: null,
+    settings,
     createdAt: Date.now(),
   };
 }
@@ -214,22 +286,18 @@ function ensureHost(room) {
   }
 }
 
-function rolePoolForParticipants(participantCount) {
-  const mafiaCount = Math.max(1, Math.floor(participantCount / 4));
-  const includeDoctor = participantCount >= 4;
-  const includeDetective = participantCount >= 5;
-
+function rolePoolFromSettings(participantCount, settings) {
   const pool = [];
 
-  for (let i = 0; i < mafiaCount; i += 1) {
+  for (let i = 0; i < settings.mafiaCount; i += 1) {
     pool.push(ROLES.MAFIA);
   }
 
-  if (includeDoctor) {
+  for (let i = 0; i < settings.doctorCount; i += 1) {
     pool.push(ROLES.DOCTOR);
   }
 
-  if (includeDetective) {
+  for (let i = 0; i < settings.detectiveCount; i += 1) {
     pool.push(ROLES.DETECTIVE);
   }
 
@@ -254,7 +322,7 @@ function assignRoles(room) {
   }
 
   const participants = players.filter((player) => player.socketId !== room.hostSocketId);
-  const pool = rolePoolForParticipants(participants.length);
+  const pool = rolePoolFromSettings(participants.length, room.settings);
 
   participants.forEach((player, index) => {
     player.role = pool[index];
@@ -413,15 +481,29 @@ function getNightViewForViewer(room, viewer) {
     }));
   }
 
+  let selfSelectionTargetId = null;
+  if (viewer) {
+    if (viewer.role === ROLES.MAFIA) {
+      selfSelectionTargetId = room.night.mafiaSelections.get(viewer.socketId) || null;
+    } else if (viewer.role === ROLES.DOCTOR) {
+      selfSelectionTargetId = room.night.doctorSelections.get(viewer.socketId) || null;
+    } else if (viewer.role === ROLES.DETECTIVE) {
+      selfSelectionTargetId = room.night.detectiveSelections.get(viewer.socketId) || null;
+    }
+  }
+
   return {
     requiredCount: requiredActors.length,
     submittedCount,
+    selfSelectionTargetId,
+    selfSubmitted: viewer ? room.night.submittedBy.has(viewer.socketId) : false,
     mafiaSelections,
   };
 }
 
 function roomSnapshotForViewer(room, viewerSocketId) {
   const viewer = room.players.get(viewerSocketId) || null;
+  const requirements = roomRequirementsFromSettings(room.settings);
 
   const players = Array.from(room.players.values())
     .sort((a, b) => a.joinedAt - b.joinedAt)
@@ -440,10 +522,13 @@ function roomSnapshotForViewer(room, viewerSocketId) {
           avatar: viewer.avatar,
           role: viewer.role,
           isAlive: viewer.isAlive,
+          isReady: viewer.isReady,
           isHost: viewer.isHost,
         }
       : null,
     players,
+    settings: { ...room.settings },
+    requirements,
     votes: getVoteTallies(room),
     night: getNightViewForViewer(room, viewer),
     lastResolution: room.lastResolution,
@@ -456,7 +541,49 @@ function emitRoomState(room) {
   }
 }
 
-function resolveNight(room) {
+function isNarratorController(player) {
+  return Boolean(player && (player.isHost || player.role === ROLES.NARRATOR));
+}
+
+function playerDisplayName(room, playerId) {
+  if (!playerId) {
+    return null;
+  }
+
+  const player = room.players.get(playerId);
+  return player ? player.username : null;
+}
+
+function buildNightStory(room, payload) {
+  const lines = ['حلّ الليل وسكنت الأصوات في المدينة...'];
+
+  if (payload.killedPlayerId) {
+    const killedName = playerDisplayName(room, payload.killedPlayerId) || 'لاعب مجهول';
+    lines.push(`مع بزوغ الفجر، تم العثور على ${killedName} جثة هامدة.`);
+  } else if (payload.savedPlayerId) {
+    const savedName = playerDisplayName(room, payload.savedPlayerId) || 'لاعب مجهول';
+    lines.push(`حاولت المافيا استهداف ${savedName} لكن الطبيب أنقذه في اللحظة الأخيرة.`);
+  } else {
+    lines.push('مرّ الليل بلا ضحايا هذه المرة.');
+  }
+
+  if (payload.detectiveDidInvestigate) {
+    lines.push('المحقق جمع خيطاً جديداً في الظلام.');
+  }
+
+  return lines.join(' ');
+}
+
+function buildVotingStory(room, payload) {
+  if (payload.eliminatedPlayerId) {
+    const eliminatedName = playerDisplayName(room, payload.eliminatedPlayerId) || 'لاعب مجهول';
+    return `بعد نقاش طويل، قرر أهل المدينة إقصاء ${eliminatedName}.`;
+  }
+
+  return 'انقسمت الأصوات ولم يتم إقصاء أي لاعب بسبب التعادل.';
+}
+
+function resolveNight(room, options = {}) {
   const mafiaTargetIds = Array.from(room.night.mafiaSelections.values()).filter((targetId) => validTarget(room, targetId));
   const chosenKillTarget = chooseTargetFromTallies(mafiaTargetIds);
 
@@ -474,6 +601,8 @@ function resolveNight(room) {
     }
   }
 
+  const detectiveDidInvestigate = room.night.detectiveSelections.size > 0;
+
   const winner = checkWinner(room);
   room.winner = winner;
 
@@ -482,8 +611,11 @@ function resolveNight(room) {
     round: room.round,
     killedPlayerId,
     savedPlayerId,
+    detectiveDidInvestigate,
+    forced: Boolean(options.forced),
     winner,
   };
+  resolution.story = buildNightStory(room, resolution);
 
   if (winner) {
     enterResolution(room, resolution);
@@ -514,7 +646,7 @@ function maybeResolveNight(room) {
   }
 }
 
-function resolveVoting(room) {
+function resolveVoting(room, options = {}) {
   const tallies = getVoteTallies(room);
   const entries = Object.entries(tallies);
 
@@ -537,14 +669,18 @@ function resolveVoting(room) {
   const winner = checkWinner(room);
   room.winner = winner;
 
-  enterResolution(room, {
+  const resolution = {
     type: 'VOTE_RESULT',
     round: room.round,
     tallies,
     eliminatedPlayerId,
     tiedPlayerIds,
+    forced: Boolean(options.forced),
     winner,
-  });
+  };
+  resolution.story = buildVotingStory(room, resolution);
+
+  enterResolution(room, resolution);
 
   emitRoomState(room);
 }
@@ -567,19 +703,20 @@ function maybeResolveVoting(room) {
 }
 
 function canStartGame(room) {
+  const requirements = roomRequirementsFromSettings(room.settings);
   const totalPlayers = room.players.size;
-  if (totalPlayers < 4) {
+  if (totalPlayers < requirements.minimumPlayers) {
     return {
       ok: false,
-      reason: 'الحد الأدنى لبدء اللعبة هو 4 لاعبين (راوي + 3 لاعبين على الأقل).',
+      reason: `الحد الأدنى الحالي هو ${requirements.minimumPlayers} لاعبين وفق إعدادات الأدوار.`,
     };
   }
 
   const participants = Array.from(room.players.values()).filter((player) => player.socketId !== room.hostSocketId);
-  if (participants.length < 3) {
+  if (participants.length < requirements.minimumParticipants) {
     return {
       ok: false,
-      reason: 'لا يوجد عدد كافٍ من المشاركين بعد استثناء الراوي.',
+      reason: `تحتاج إلى ${requirements.minimumParticipants} مشاركين على الأقل (بدون الراوي).`,
     };
   }
 
@@ -596,6 +733,76 @@ function canStartGame(room) {
 
 function emitError(socket, message) {
   socket.emit('game_error', { message });
+}
+
+function skipCurrentPhase(room) {
+  if (room.phase === PHASES.LOBBY) {
+    return {
+      ok: false,
+      message: 'لا يمكن التخطي في اللوبي قبل بدء اللعبة.',
+    };
+  }
+
+  if (room.phase === PHASES.ROLE_ASSIGNMENT) {
+    startNightPhase(room);
+    emitRoomState(room);
+    maybeResolveNight(room);
+    return {
+      ok: true,
+      message: 'تم تخطي توزيع الأدوار والانتقال مباشرة إلى الليل.',
+    };
+  }
+
+  if (room.phase === PHASES.NIGHT_PHASE) {
+    resolveNight(room, { forced: true });
+    return {
+      ok: true,
+      message: 'تم إنهاء الليل يدوياً بواسطة الراوي.',
+    };
+  }
+
+  if (room.phase === PHASES.DAY_PHASE) {
+    room.phase = PHASES.VOTING;
+    room.votes = new Map();
+    emitRoomState(room);
+    maybeResolveVoting(room);
+    return {
+      ok: true,
+      message: 'تم تخطي النقاش والانتقال مباشرة إلى التصويت.',
+    };
+  }
+
+  if (room.phase === PHASES.VOTING) {
+    resolveVoting(room, { forced: true });
+    return {
+      ok: true,
+      message: 'تم إنهاء التصويت فوراً بواسطة الراوي.',
+    };
+  }
+
+  if (room.phase === PHASES.RESOLUTION) {
+    if (room.winner) {
+      resetToLobby(room);
+      emitRoomState(room);
+      return {
+        ok: true,
+        message: 'تمت إعادة الغرفة إلى اللوبي بعد إعلان الفائز.',
+      };
+    }
+
+    startNightPhase(room);
+    emitRoomState(room);
+    maybeResolveNight(room);
+    return {
+      ok: true,
+      message: 'تم تخطي شاشة النتيجة وبدء ليلة جديدة.',
+    };
+  }
+
+  return {
+    ok: false,
+    message: 'لا يمكن التخطي في هذه المرحلة.',
+  };
 }
 
 function removePlayerFromRoom(room, socketId) {
@@ -632,9 +839,12 @@ function removePlayerFromRoom(room, socketId) {
     const winner = checkWinner(room);
     room.winner = winner;
     if (winner && room.phase !== PHASES.RESOLUTION) {
+      const departedName = player.username;
       enterResolution(room, {
         type: 'FORFEIT_RESULT',
         round: room.round,
+        story: `غادر ${departedName} الغرفة أثناء الجولة، وتم حسم اللعبة تلقائياً.`,
+        forced: true,
         winner,
       });
     }
@@ -860,6 +1070,28 @@ io.on('connection', (socket) => {
     emitRoomState(room);
   });
 
+  socket.on('update_room_settings', (payload = {}) => {
+    const roomId = normalizeRoomId(payload.roomId || socket.data.roomId);
+    const room = rooms.get(roomId);
+    if (!room) {
+      return;
+    }
+
+    if (socket.id !== room.hostSocketId) {
+      emitError(socket, 'فقط الراوي يمكنه تعديل إعدادات الغرفة.');
+      return;
+    }
+
+    if (room.phase !== PHASES.LOBBY) {
+      emitError(socket, 'يمكن تعديل الإعدادات فقط داخل اللوبي قبل بدء اللعبة.');
+      return;
+    }
+
+    const incoming = payload.settings || payload;
+    room.settings = sanitizeRoomSettings(incoming, room.settings);
+    emitRoomState(room);
+  });
+
   socket.on('start_game', (payload = {}) => {
     const roomId = normalizeRoomId(payload.roomId || socket.data.roomId);
     const room = rooms.get(roomId);
@@ -933,6 +1165,30 @@ io.on('connection', (socket) => {
     room.votes = new Map();
     emitRoomState(room);
     maybeResolveVoting(room);
+  });
+
+  socket.on('skip_phase', (payload = {}) => {
+    const roomId = normalizeRoomId(payload.roomId || socket.data.roomId);
+    const room = rooms.get(roomId);
+    if (!room) {
+      return;
+    }
+
+    const player = room.players.get(socket.id);
+    if (!isNarratorController(player)) {
+      emitError(socket, 'فقط الراوي يمكنه تخطي المراحل.');
+      return;
+    }
+
+    const result = skipCurrentPhase(room);
+    if (!result.ok) {
+      emitError(socket, result.message);
+      return;
+    }
+
+    io.to(roomId).emit('system_notice', {
+      message: result.message,
+    });
   });
 
   socket.on('cast_vote', (payload = {}) => {
@@ -1040,6 +1296,11 @@ io.on('connection', (socket) => {
       return;
     }
 
+    if (targetId === socket.id) {
+      emitError(socket, 'لا يمكن لعضو المافيا استهداف نفسه.');
+      return;
+    }
+
     room.night.mafiaSelections.set(socket.id, targetId);
     room.night.submittedBy.add(socket.id);
 
@@ -1101,6 +1362,11 @@ io.on('connection', (socket) => {
 
     if (!validTarget(room, targetId)) {
       emitError(socket, 'هدف التحقيق غير صالح.');
+      return;
+    }
+
+    if (targetId === socket.id) {
+      emitError(socket, 'لا يمكن للمحقق التحقيق مع نفسه.');
       return;
     }
 
